@@ -21,4 +21,8 @@ export const apiService = {
   categorizeTransaction: (description: string, amount: number) => axios.post(`${API_URL}/api/gemini/categorize-transaction`, { description, amount }),
   getBudgetInsights: (transactions: any[]) => axios.post(`${API_URL}/api/gemini/budget-insights`, { transactions }),
   getGoalAdvice: (goal: any) => axios.post(`${API_URL}/api/gemini/goal-advice`, { goal }),
+
+  // Live Voice Chat
+  getLiveVoiceWebSocketUrl: () => `ws://192.168.1.36:3000/live-voice`,
+  checkLiveVoiceHealth: () => axios.get(`${API_URL}/health`),
 };

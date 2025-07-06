@@ -3,6 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import db from './database';
 import { GoogleGenAI } from '@google/genai';
+import { initializeLiveVoiceServer } from './liveVoiceServer';
 
 dotenv.config();
 
@@ -189,7 +190,10 @@ app.post("/api/gemini/goal-advice", async (req, res) => {
     }
 });
 
-app.listen(Number(port), '0.0.0.0', () => {
+const server = app.listen(Number(port), '0.0.0.0', () => {
     console.log(`Server is running on http://0.0.0.0:${port}`);
     console.log(`Access from your device: http://192.168.1.36:${port}`);
 });
+
+// Initialize live voice WebSocket server
+initializeLiveVoiceServer(server);
