@@ -16,12 +16,17 @@ interface LiveSession {
   isActive: boolean;
   responseQueue: any[];
   audioResponseBuffer: Buffer[];
+  sessionState: 'connecting' | 'connected' | 'error' | 'closing' | 'closed';
+  createdAt: Date;
+  lastActivity: Date;
 }
 
 class LiveVoiceServer {
   private wss: WebSocketServer | null = null;
   private sessions: Map<string, LiveSession> = new Map();
   private genAI: GoogleGenAI;
+  private sessionTimeoutInterval: NodeJS.Timeout | null = null;
+  private readonly SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 
   constructor() {
     this.genAI = new GoogleGenAI({
@@ -41,6 +46,9 @@ class LiveVoiceServer {
     });
 
     console.log('Live Voice WebSocket server initialized on /live-voice');
+    
+    // Start session timeout monitoring
+    this.startSessionTimeoutMonitoring();
   }
 
   private async handleConnection(ws: WebSocket): Promise<void> {
@@ -53,6 +61,12 @@ class LiveVoiceServer {
         callbacks: {
           onopen: () => {
             console.log(`Gemini session opened for ${sessionId}`);
+            // Update session state to connected
+            const session = this.sessions.get(sessionId);
+            if (session) {
+              session.sessionState = 'connected';
+              session.lastActivity = new Date();
+            }
             this.sendToClient(ws, {
               type: 'session_started',
               sessionId: sessionId
@@ -63,6 +77,12 @@ class LiveVoiceServer {
           },
           onerror: (error: any) => {
             console.error('Gemini session error:', error);
+            // Update session state to error
+            const session = this.sessions.get(sessionId);
+            if (session) {
+              session.sessionState = 'error';
+              session.lastActivity = new Date();
+            }
             this.sendToClient(ws, {
               type: 'error',
               message: 'Gemini connection error'
@@ -70,6 +90,12 @@ class LiveVoiceServer {
           },
           onclose: (event: any) => {
             console.log('Gemini session closed:', event.reason);
+            // Update session state to closed
+            const session = this.sessions.get(sessionId);
+            if (session) {
+              session.sessionState = 'closed';
+              session.lastActivity = new Date();
+            }
             this.cleanupSession(sessionId);
           },
         },
@@ -79,20 +105,24 @@ class LiveVoiceServer {
         },
       });
 
-      // Create session
+      // Create session with enhanced state management
       const session: LiveSession = {
         id: sessionId,
         geminiSession,
         clientWs: ws,
         isActive: true,
         responseQueue: [],
-        audioResponseBuffer: []
+        audioResponseBuffer: [],
+        sessionState: 'connecting',
+        createdAt: new Date(),
+        lastActivity: new Date()
       };
 
       this.sessions.set(sessionId, session);
 
       // Handle client messages
       ws.on('message', (data: Buffer) => {
+        console.log(`[DEBUG] WebSocket message received for session ${sessionId}, size: ${data.length} bytes`);
         this.handleClientMessage(sessionId, data);
       });
 
@@ -118,9 +148,23 @@ class LiveVoiceServer {
 
   private handleClientMessage(sessionId: string, data: Buffer): void {
     const session = this.sessions.get(sessionId);
-    if (!session || !session.isActive) return;
+    if (!session || !session.isActive) {
+      console.log(`[DEBUG] Session check failed: session=${!!session}, isActive=${session?.isActive}, state=${session?.sessionState}`);
+      return;
+    }
+    
+    // Allow processing for both connecting and connected states
+    if (session.sessionState !== 'connected' && session.sessionState !== 'connecting') {
+      console.log(`[DEBUG] Session state check failed: ${session.sessionState}`);
+      return;
+    }
+    
+    // Update last activity timestamp
+    session.lastActivity = new Date();
 
     const dataString = data.toString();
+    console.log(`[DEBUG] Received raw message: ${dataString.substring(0, 100)}...`);
+    
     // Handles cases where multiple JSON objects are sent in one packet
     const messages = dataString.replace(/}\s*{/g, '}}\n{').split('\n');
 
@@ -133,7 +177,7 @@ class LiveVoiceServer {
           
           switch (message.type) {
             case 'audio_chunk':
-              console.log(`Received audio chunk, mimeType: ${message.mimeType}, data length: ${message.data?.length || 0}`);
+              console.log(`[AUDIO] Received audio chunk, mimeType: ${message.mimeType}, data length: ${message.data?.length || 0}`);
               this.handleAudioChunk(session, message.data, message.mimeType);
               break;
             case 'end_turn':
@@ -142,6 +186,14 @@ class LiveVoiceServer {
               break;
             case 'ping':
               this.sendToClient(session.clientWs, { type: 'pong' });
+              break;
+            case 'session_info':
+              // Send session information back to client
+              const sessionInfo = this.getSessionInfo(sessionId);
+              this.sendToClient(session.clientWs, {
+                type: 'session_info_response',
+                sessionInfo: sessionInfo
+              });
               break;
             default:
               console.warn(`Unknown message type: ${message.type}`);
@@ -157,19 +209,19 @@ class LiveVoiceServer {
 
   private async handleAudioChunk(session: LiveSession, audioData: Buffer | string, mimeType?: string): Promise<void> {
     try {
-      console.log('Processing audio chunk...');
+      console.log('[AUDIO] Processing audio chunk...');
       // Convert client audio to required format (16-bit PCM, 16kHz, mono)
       const processedAudio = await this.processAudioForGemini(audioData, mimeType);
-      console.log('Audio conversion completed, sending to Gemini...');
+      console.log('[AUDIO] Audio conversion completed, sending to Gemini...');
       
-      // Send to Gemini
+      // Send to Gemini using sendRealtimeInput for audio (as recommended in docs)
       session.geminiSession.sendRealtimeInput({
-        audio: {
+        media: {
           data: processedAudio,
           mimeType: "audio/pcm;rate=16000"
         }
       });
-      console.log('Audio sent to Gemini successfully');
+      console.log('[AUDIO] Audio sent to Gemini successfully');
     } catch (error) {
       console.error('Error processing audio chunk:', error);
       this.sendToClient(session.clientWs, {
@@ -180,13 +232,13 @@ class LiveVoiceServer {
   }
 
   private handleEndTurn(session: LiveSession): void {
-    // Signal end of user input to Gemini
+    // Signal end of user input to Gemini - just stop sending audio, don't signal session end
     try {
-      console.log('Signaling turn completion to Gemini...');
-      session.geminiSession.sendRealtimeInput({
-        turnComplete: true
-      });
-      console.log('Successfully signaled turn completion.');
+      console.log('End of user turn detected - stopping audio input...');
+      // Instead of sending turnComplete (which closes the session), 
+      // we just stop sending audio and let Gemini naturally detect the end of speech
+      // The Gemini Live API will automatically detect when audio input stops
+      console.log('User turn ended - waiting for Gemini response...');
     } catch (error) {
       console.error('Error ending turn:', error);
     }
@@ -197,7 +249,10 @@ class LiveVoiceServer {
     if (!session || !session.isActive) return;
 
     try {
+      console.log('[GEMINI] Received message from Gemini:', Object.keys(message));
+      
       if (message.data) {
+        console.log('[GEMINI] Received audio data from Gemini:', message.data.length, 'chars');
         session.audioResponseBuffer.push(Buffer.from(message.data, 'base64'));
       }
 
@@ -216,8 +271,10 @@ class LiveVoiceServer {
         }
 
         if (message.serverContent.turnComplete) {
+          console.log('[GEMINI] Turn complete received, processing audio response...');
           if (session.audioResponseBuffer.length > 0) {
             const fullAudio = Buffer.concat(session.audioResponseBuffer);
+            console.log(`[GEMINI] Sending ${fullAudio.length} bytes of audio to client`);
             const wavHeader = this.createWavHeader(fullAudio.length, 24000);
             const wavFile = Buffer.concat([wavHeader, fullAudio]);
 
@@ -226,6 +283,9 @@ class LiveVoiceServer {
               audio: wavFile.toString('base64')
             });
             session.audioResponseBuffer = []; // Clear the buffer
+            console.log('[GEMINI] Audio response sent to client');
+          } else {
+            console.log('[GEMINI] No audio response buffer to send');
           }
         }
       }
@@ -296,6 +356,9 @@ class LiveVoiceServer {
           console.error(`ffmpeg stderr: ${data}`);
         });
 
+      } else if (mimeType && mimeType.includes('pcm')) {
+        // Already in the correct PCM format, just return as base64
+        resolve(buffer.toString('base64'));
       } else {
         const wav = new WaveFile();
         wav.fromBuffer(buffer);
@@ -344,24 +407,38 @@ class LiveVoiceServer {
   private cleanupSession(sessionId: string): void {
     const session = this.sessions.get(sessionId);
     if (session) {
-      session.isActive = false;
+      console.log(`Cleaning up session ${sessionId} (state: ${session.sessionState})`);
       
-      // Close Gemini session
+      // Update session state to closing
+      session.sessionState = 'closing';
+      session.isActive = false;
+      session.lastActivity = new Date();
+      
+      // Close Gemini session using proper close() method from docs
       if (session.geminiSession) {
         try {
-          session.geminiSession.close();
+          console.log(`Calling session.close() for Gemini session ${sessionId}`);
+          session.geminiSession.close(); // Explicit close as per documentation
+          console.log(`Gemini session closed successfully for ${sessionId}`);
         } catch (error) {
-          console.error('Error closing Gemini session:', error);
+          console.error(`Error closing Gemini session ${sessionId}:`, error);
         }
       }
       
       // Close client WebSocket
       if (session.clientWs && session.clientWs.readyState === WebSocket.OPEN) {
-        session.clientWs.close();
+        try {
+          session.clientWs.close(1000, 'Session cleanup');
+        } catch (error) {
+          console.error(`Error closing WebSocket for session ${sessionId}:`, error);
+        }
       }
       
+      // Final state update
+      session.sessionState = 'closed';
+      
       this.sessions.delete(sessionId);
-      console.log(`Session cleaned up: ${sessionId}`);
+      console.log(`Session cleaned up successfully: ${sessionId}`);
     }
   }
 
@@ -369,7 +446,73 @@ class LiveVoiceServer {
     return this.sessions.size;
   }
 
+  private startSessionTimeoutMonitoring(): void {
+    // Check for inactive sessions every 5 minutes
+    this.sessionTimeoutInterval = setInterval(() => {
+      const now = new Date();
+      const sessionsToCleanup: string[] = [];
+      
+      for (const [sessionId, session] of this.sessions) {
+        const timeSinceLastActivity = now.getTime() - session.lastActivity.getTime();
+        
+        if (timeSinceLastActivity > this.SESSION_TIMEOUT_MS) {
+          console.log(`Session ${sessionId} timed out (inactive for ${Math.round(timeSinceLastActivity / 1000 / 60)} minutes)`);
+          sessionsToCleanup.push(sessionId);
+        }
+      }
+      
+      // Cleanup timed out sessions
+      for (const sessionId of sessionsToCleanup) {
+        this.cleanupSession(sessionId);
+      }
+      
+      if (sessionsToCleanup.length > 0) {
+        console.log(`Cleaned up ${sessionsToCleanup.length} timed out sessions`);
+      }
+    }, 5 * 60 * 1000); // Check every 5 minutes
+    
+    console.log('Session timeout monitoring started (30 minute timeout)');
+  }
+
+  private stopSessionTimeoutMonitoring(): void {
+    if (this.sessionTimeoutInterval) {
+      clearInterval(this.sessionTimeoutInterval);
+      this.sessionTimeoutInterval = null;
+      console.log('Session timeout monitoring stopped');
+    }
+  }
+
+  public getSessionInfo(sessionId: string): any {
+    const session = this.sessions.get(sessionId);
+    if (!session) return null;
+    
+    return {
+      id: session.id,
+      state: session.sessionState,
+      isActive: session.isActive,
+      createdAt: session.createdAt,
+      lastActivity: session.lastActivity,
+      uptime: new Date().getTime() - session.createdAt.getTime()
+    };
+  }
+
+  public getAllSessionsInfo(): any[] {
+    return Array.from(this.sessions.values()).map(session => ({
+      id: session.id,
+      state: session.sessionState,
+      isActive: session.isActive,
+      createdAt: session.createdAt,
+      lastActivity: session.lastActivity,
+      uptime: new Date().getTime() - session.createdAt.getTime()
+    }));
+  }
+
   public cleanup(): void {
+    console.log('Starting LiveVoiceServer cleanup...');
+    
+    // Stop session monitoring
+    this.stopSessionTimeoutMonitoring();
+    
     // Cleanup all sessions
     for (const [sessionId] of this.sessions) {
       this.cleanupSession(sessionId);
@@ -379,6 +522,8 @@ class LiveVoiceServer {
     if (this.wss) {
       this.wss.close();
     }
+    
+    console.log('LiveVoiceServer cleanup completed');
   }
 }
 

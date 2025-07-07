@@ -20,7 +20,7 @@
     "express": "^5.1.0",
     "sqlite3": "^5.1.7",
     "wavefile": "^11.0.0",
-    "ws": "^8.14.2"
+    "ws": "^8.18.3"
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",
