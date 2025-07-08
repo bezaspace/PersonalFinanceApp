@@ -15,12 +15,17 @@
   "description": "",
   "dependencies": {
     "@google/genai": "^1.7.0",
+    "@langchain/core": "^0.3.62",
+    "@langchain/groq": "^0.2.3",
+    "axios": "^1.10.0",
     "cors": "^2.8.5",
     "dotenv": "^17.0.0",
     "express": "^5.1.0",
     "sqlite3": "^5.1.7",
+    "uuid": "^11.1.0",
     "wavefile": "^11.0.0",
-    "ws": "^8.18.3"
+    "ws": "^8.18.3",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",
