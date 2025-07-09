@@ -6,7 +6,9 @@
     "start": "ts-node-dev src/index.ts",
     "build": "tsc",
     "serve": "node dist/index.js",
-    "seed": "ts-node src/seed.ts"
+    "seed": "ts-node src/seed.ts",
+    "speech": "node simple-speech-to-text.js",
+    "speech-live": "node live-speech-to-text.js"
   },
   "keywords": [],
   "author": "",
