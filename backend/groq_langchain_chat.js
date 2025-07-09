@@ -4,9 +4,81 @@ const { z } = require('zod');
 const readline = require('readline');
 const axios = require('axios');
 const path = require('path');
+const { spawn } = require('child_process');
+const os = require('os');
 
 // Load environment variables
 require('dotenv').config({ path: path.join(__dirname, '.env') });
+
+// Import the working TTS implementation from groq-tts.js
+const { generateSpeech } = require('./groq-tts.js');
+
+// TTS Service Class using the working groq-tts.js implementation
+class GroqTTSService {
+    constructor(apiKey) {
+        this.apiKey = apiKey;
+        this.isEnabled = true;
+        this.currentPlayer = null;
+        console.log('TTS Service initialized with groq-tts.js implementation');
+    }
+
+    // Main method: convert text to speech and play directly using groq-tts.js
+    async playTextDirectly(text) {
+        if (!this.isEnabled) {
+            console.log('TTS is disabled');
+            return;
+        }
+
+        try {
+            console.log('Converting text to speech using groq-tts.js...');
+            
+            // Truncate text to avoid token limit (approximately 800 characters to stay under 1200 tokens)
+            let truncatedText = text;
+            if (text.length > 800) {
+                truncatedText = text.substring(0, 800) + "...";
+                console.log('Text truncated for TTS due to length limits');
+            }
+            
+            // Use the working generateSpeech function from groq-tts.js
+            // This function automatically plays the audio and returns a success message
+            const result = await generateSpeech(truncatedText, {
+                voice: "Fritz-PlayAI",
+                model: "playai-tts",
+                responseFormat: "wav",
+                saveFile: false // Don't save files, just play
+            });
+            
+            console.log('Audio playback completed successfully');
+            return result;
+            
+        } catch (error) {
+            console.error('Failed to play audio:', error.message);
+            if (error.message.includes('Invalid API Key') || error.response?.status === 401) {
+                console.log('\nTTS API Key Issue:');
+                console.log('   Your Groq API key may not have TTS access enabled.');
+                console.log('   Please check: https://console.groq.com/keys');
+                console.log('   Or contact Groq support to enable TTS features.');
+                console.log('   Disabling TTS for this session...\n');
+                this.isEnabled = false;
+            }
+            console.log('Continuing with text-only mode...');
+        }
+    }
+
+    // Stop current audio playback (placeholder - groq-tts.js handles this internally)
+    stopAudio() {
+        console.log('Audio stop requested (handled by system audio player)');
+        // Note: The groq-tts.js implementation uses system audio players
+        // which can be stopped using system-specific commands if needed
+    }
+
+    // Toggle TTS on/off
+    toggleTTS() {
+        this.isEnabled = !this.isEnabled;
+        console.log(`TTS ${this.isEnabled ? 'enabled' : 'disabled'}`);
+        return this.isEnabled;
+    }
+}
 
 class GroqLangChainFinancialChat {
     constructor() {
@@ -15,6 +87,7 @@ class GroqLangChainFinancialChat {
         this.apiUrl = 'http://localhost:3000';
         this.conversationHistory = [];
         this.tools = [];
+        this.ttsService = null;
     }
 
     // Create the transactions tool using LangChain
@@ -22,7 +95,7 @@ class GroqLangChainFinancialChat {
         const getLastTransactionsTool = tool(
             async ({ limit = 10 }) => {
                 try {
-                    console.log(`🔍 Fetching last ${limit} transactions...`);
+                    console.log(`Fetching last ${limit} transactions...`);
                     
                     const response = await axios.get(`${this.apiUrl}/transactions`, {
                         timeout: 5000 // 5 second timeout
@@ -83,14 +156,14 @@ class GroqLangChainFinancialChat {
     // Initialize the Groq model and tools
     async initialize() {
         try {
-            console.log('🚀 Initializing Groq LangChain Financial Chat...');
+            console.log('Initializing Groq LangChain Financial Chat with TTS...');
 
             // Check for API key
             if (!process.env.GROQ_API_KEY) {
                 throw new Error('GROQ_API_KEY environment variable is required');
             }
 
-            console.log('🔑 API key found, creating model...');
+            console.log('API key found, creating model...');
 
             // Initialize Groq model
             this.model = new ChatGroq({
@@ -99,7 +172,24 @@ class GroqLangChainFinancialChat {
                 apiKey: process.env.GROQ_API_KEY,
             });
 
-            console.log('🤖 Model created, setting up tools...');
+            // Initialize TTS service using the working groq-tts.js implementation
+            this.ttsService = new GroqTTSService(process.env.GROQ_API_KEY);
+            
+            // Test TTS capability
+            try {
+                console.log('Testing TTS API key...');
+                await axios.get('https://api.groq.com/openai/v1/models', {
+                    headers: { 'Authorization': `Bearer ${process.env.GROQ_API_KEY}` },
+                    timeout: 5000
+                });
+                console.log('TTS API key is valid');
+            } catch (error) {
+                console.warn('Warning: TTS API key test failed - TTS will be disabled');
+                console.warn('TTS Error:', error.response?.data || error.message);
+                this.ttsService.isEnabled = false;
+            }
+
+            console.log('Model created, setting up tools...');
 
             // Create tools
             const transactionsTool = this.createTransactionsTool();
@@ -108,7 +198,7 @@ class GroqLangChainFinancialChat {
             // Bind tools to the model
             this.modelWithTools = this.model.bindTools(this.tools);
 
-            console.log('🔧 Tools bound to model, testing connection...');
+            console.log('Tools bound to model, testing connection...');
 
             // Quick API test with timeout
             try {
@@ -118,19 +208,20 @@ class GroqLangChainFinancialChat {
                         setTimeout(() => reject(new Error('API test timeout')), 5000)
                     )
                 ]);
-                console.log('✅ Database API connection successful');
+                console.log('Database API connection successful');
             } catch (error) {
-                console.warn('⚠️  Warning: Database API test failed:', error.message);
+                console.warn('Warning: Database API test failed:', error.message);
                 console.warn('   The chat will still work, but transaction data may not be available.');
             }
 
-            console.log('✅ Groq LangChain Financial Chat initialized successfully!');
-            console.log('🔧 Available tools: getLastTransactions');
-            console.log('💡 You can ask about your recent transactions and get financial insights!\n');
+            console.log('Groq LangChain Financial Chat with TTS initialized successfully!');
+            console.log('Available tools: getLastTransactions');
+            console.log('TTS: Enabled (type "mute" to disable, "unmute" to enable)');
+            console.log('You can ask about your recent transactions and get financial insights!\n');
 
             return true;
         } catch (error) {
-            console.error('❌ Error initializing Groq LangChain Chat:', error.message);
+            console.error('Error initializing Groq LangChain Chat:', error.message);
             return false;
         }
     }
@@ -138,6 +229,20 @@ class GroqLangChainFinancialChat {
     // Process user input and handle tool calls
     async processMessage(userInput) {
         try {
+            // Handle TTS commands
+            if (userInput.toLowerCase().trim() === 'mute') {
+                this.ttsService.toggleTTS();
+                return "Text-to-speech has been disabled.";
+            }
+            if (userInput.toLowerCase().trim() === 'unmute') {
+                this.ttsService.toggleTTS();
+                return "Text-to-speech has been enabled.";
+            }
+            if (userInput.toLowerCase().trim() === 'stop') {
+                this.ttsService.stopAudio();
+                return "Audio playback stopped.";
+            }
+
             // Add user message to conversation history
             this.conversationHistory.push({
                 role: 'user',
@@ -162,7 +267,7 @@ class GroqLangChainFinancialChat {
                 ...this.conversationHistory
             ];
 
-            console.log('🤖 Processing your request...');
+            console.log('Processing your request...');
 
             // Send message to model with tools (with timeout)
             const response = await Promise.race([
@@ -174,7 +279,7 @@ class GroqLangChainFinancialChat {
 
             // Check if the model wants to use tools
             if (response.tool_calls && response.tool_calls.length > 0) {
-                console.log('🔧 Using tools to fetch your data...');
+                console.log('Using tools to fetch your data...');
                 
                 // Execute tool calls
                 for (const toolCall of response.tool_calls) {
@@ -246,22 +351,27 @@ class GroqLangChainFinancialChat {
             output: process.stdout
         });
 
-        console.log('💬 Groq LangChain Financial Chat is ready!');
-        console.log('📊 Ask me about your transactions, spending patterns, or get financial advice!');
-        console.log('💡 Examples:');
+        console.log('Groq LangChain Financial Chat with Voice is ready!');
+        console.log('Ask me about your transactions, spending patterns, or get financial advice!');
+        console.log('Examples:');
         console.log('   - "Show me my recent transactions"');
         console.log('   - "What did I spend money on this week?"');
         console.log('   - "Analyze my spending patterns"');
         console.log('   - "How much did I spend on food recently?"');
-        console.log('🚪 Type "exit", "quit", or "bye" to end the conversation.\n');
+        console.log('Voice Commands:');
+        console.log('   - "mute" - Disable text-to-speech');
+        console.log('   - "unmute" - Enable text-to-speech');
+        console.log('   - "stop" - Stop current audio playback');
+        console.log('Type "exit", "quit", or "bye" to end the conversation.\n');
 
         const askQuestion = () => {
-            this.rl.question('💰 You: ', async (input) => {
+            this.rl.question('You: ', async (input) => {
                 const trimmedInput = input.trim().toLowerCase();
                 
                 if (trimmedInput === 'exit' || trimmedInput === 'quit' || trimmedInput === 'bye') {
-                    console.log('\n👋 Thank you for using Groq LangChain Financial Chat!');
-                    console.log('💡 Remember to keep tracking your expenses and stay on budget!');
+                    console.log('\nThank you for using Groq LangChain Financial Chat!');
+                    console.log('Remember to keep tracking your expenses and stay on budget!');
+                    this.ttsService.stopAudio(); // Stop any playing audio
                     this.rl.close();
                     return;
                 }
@@ -273,10 +383,19 @@ class GroqLangChainFinancialChat {
 
                 try {
                     const response = await this.processMessage(input);
-                    console.log('\n🤖 Financial Advisor:', response);
+                    console.log('\nFinancial Advisor:', response);
+                    
+                    // Add TTS output (non-blocking)
+                    if (this.ttsService.isEnabled) {
+                        // Play audio in the background without blocking the chat
+                        this.ttsService.playTextDirectly(response).catch(error => {
+                            console.log('Audio playback failed, continuing with text-only mode');
+                        });
+                    }
+                    
                     console.log('\n' + '─'.repeat(80) + '\n');
                 } catch (error) {
-                    console.error('\n❌ Error:', error.message);
+                    console.error('\nError:', error.message);
                     console.log('\n' + '─'.repeat(80) + '\n');
                 }
 
@@ -290,7 +409,7 @@ class GroqLangChainFinancialChat {
 
 // Handle graceful shutdown
 process.on('SIGINT', () => {
-    console.log('\n\n👋 Goodbye! Take care of your finances!');
+    console.log('\n\nGoodbye! Take care of your finances!');
     process.exit(0);
 });
 
