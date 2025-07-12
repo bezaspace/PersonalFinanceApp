@@ -7,22 +7,29 @@ const path = require('path');
 const { spawn } = require('child_process');
 const os = require('os');
 
-// Load environment variables
-require('dotenv').config({ path: path.join(__dirname, '.env') });
+// Load environment variables with explicit override to handle Windows issues
+require('dotenv').config({ path: path.join(__dirname, '.env'), override: true });
 
-// Import the working TTS implementation from groq-tts.js
-const { generateSpeech } = require('./groq-tts.js');
+// Additional safety: manually trim environment variables to handle Windows encoding issues
+if (process.env.GROQ_API_KEY) {
+    process.env.GROQ_API_KEY = process.env.GROQ_API_KEY.trim().replace(/\r?\n|\r/g, '');
+    console.log('DEBUG: Successfully loaded and cleaned GROQ_API_KEY');
+    console.log('DEBUG: API key length:', process.env.GROQ_API_KEY.length);
+}
 
-// TTS Service Class using the working groq-tts.js implementation
-class GroqTTSService {
+// Import the Gemini TTS implementation
+const { generateSpeech } = require('./gemini-tts.js');
+
+// TTS Service Class using Gemini TTS implementation
+class GeminiTTSService {
     constructor(apiKey) {
         this.apiKey = apiKey;
         this.isEnabled = true;
         this.currentPlayer = null;
-        console.log('TTS Service initialized with groq-tts.js implementation');
+        console.log('TTS Service initialized with Gemini TTS implementation');
     }
 
-    // Main method: convert text to speech and play directly using groq-tts.js
+    // Main method: convert text to speech and play directly using Gemini TTS
     async playTextDirectly(text) {
         if (!this.isEnabled) {
             console.log('TTS is disabled');
@@ -30,20 +37,20 @@ class GroqTTSService {
         }
 
         try {
-            console.log('Converting text to speech using groq-tts.js...');
+            console.log('Converting text to speech using Gemini TTS...');
             
-            // Truncate text to avoid token limit (approximately 800 characters to stay under 1200 tokens)
+            // Truncate text to avoid token limit (approximately 800 characters to stay under limits)
             let truncatedText = text;
             if (text.length > 800) {
                 truncatedText = text.substring(0, 800) + "...";
                 console.log('Text truncated for TTS due to length limits');
             }
             
-            // Use the working generateSpeech function from groq-tts.js
+            // Use the Gemini TTS generateSpeech function
             // This function automatically plays the audio and returns a success message
             const result = await generateSpeech(truncatedText, {
-                voice: "Fritz-PlayAI",
-                model: "playai-tts",
+                voice: "Kore",
+                model: "gemini-2.5-flash-preview-tts",
                 responseFormat: "wav",
                 saveFile: false // Don't save files, just play
             });
@@ -53,11 +60,11 @@ class GroqTTSService {
             
         } catch (error) {
             console.error('Failed to play audio:', error.message);
-            if (error.message.includes('Invalid API Key') || error.response?.status === 401) {
+            if (error.message.includes('Invalid') && error.message.includes('API key')) {
                 console.log('\nTTS API Key Issue:');
-                console.log('   Your Groq API key may not have TTS access enabled.');
-                console.log('   Please check: https://console.groq.com/keys');
-                console.log('   Or contact Groq support to enable TTS features.');
+                console.log('   Your Gemini API key may be invalid or missing.');
+                console.log('   Please check your GEMINI_API_KEY environment variable.');
+                console.log('   Get your API key from: https://aistudio.google.com/app/apikey');
                 console.log('   Disabling TTS for this session...\n');
                 this.isEnabled = false;
             }
@@ -65,10 +72,10 @@ class GroqTTSService {
         }
     }
 
-    // Stop current audio playback (placeholder - groq-tts.js handles this internally)
+    // Stop current audio playback (placeholder - gemini-tts.js handles this internally)
     stopAudio() {
         console.log('Audio stop requested (handled by system audio player)');
-        // Note: The groq-tts.js implementation uses system audio players
+        // Note: The gemini-tts.js implementation uses system audio players
         // which can be stopped using system-specific commands if needed
     }
 
@@ -172,20 +179,20 @@ class GroqLangChainFinancialChat {
                 apiKey: process.env.GROQ_API_KEY,
             });
 
-            // Initialize TTS service using the working groq-tts.js implementation
-            this.ttsService = new GroqTTSService(process.env.GROQ_API_KEY);
+            // Initialize TTS service using Gemini TTS implementation
+            this.ttsService = new GeminiTTSService(process.env.GEMINI_API_KEY);
             
             // Test TTS capability
             try {
-                console.log('Testing TTS API key...');
-                await axios.get('https://api.groq.com/openai/v1/models', {
-                    headers: { 'Authorization': `Bearer ${process.env.GROQ_API_KEY}` },
-                    timeout: 5000
-                });
-                console.log('TTS API key is valid');
+                console.log('Testing Gemini TTS API key...');
+                if (!process.env.GEMINI_API_KEY) {
+                    throw new Error('GEMINI_API_KEY environment variable is required');
+                }
+                // Simple validation - we'll test actual TTS functionality on first use
+                console.log('Gemini API key found');
             } catch (error) {
-                console.warn('Warning: TTS API key test failed - TTS will be disabled');
-                console.warn('TTS Error:', error.response?.data || error.message);
+                console.warn('Warning: Gemini TTS API key test failed - TTS will be disabled');
+                console.warn('TTS Error:', error.message);
                 this.ttsService.isEnabled = false;
             }
 
@@ -214,9 +221,9 @@ class GroqLangChainFinancialChat {
                 console.warn('   The chat will still work, but transaction data may not be available.');
             }
 
-            console.log('Groq LangChain Financial Chat with TTS initialized successfully!');
+            console.log('Groq LangChain Financial Chat with Gemini TTS initialized successfully!');
             console.log('Available tools: getLastTransactions');
-            console.log('TTS: Enabled (type "mute" to disable, "unmute" to enable)');
+            console.log('TTS: Gemini TTS Enabled (type "mute" to disable, "unmute" to enable)');
             console.log('You can ask about your recent transactions and get financial insights!\n');
 
             return true;
@@ -351,14 +358,14 @@ class GroqLangChainFinancialChat {
             output: process.stdout
         });
 
-        console.log('Groq LangChain Financial Chat with Voice is ready!');
+        console.log('Groq LangChain Financial Chat with Gemini TTS is ready!');
         console.log('Ask me about your transactions, spending patterns, or get financial advice!');
         console.log('Examples:');
         console.log('   - "Show me my recent transactions"');
         console.log('   - "What did I spend money on this week?"');
         console.log('   - "Analyze my spending patterns"');
         console.log('   - "How much did I spend on food recently?"');
-        console.log('Voice Commands:');
+        console.log('Voice Commands (Gemini TTS):');
         console.log('   - "mute" - Disable text-to-speech');
         console.log('   - "unmute" - Enable text-to-speech');
         console.log('   - "stop" - Stop current audio playback');

@@ -1,7 +1,7 @@
 
 import axios from 'axios';
 
-const API_URL = 'http://192.168.1.36:3000';
+const API_URL = 'http://localhost:3000';
 
 export const apiService = {
   // Transactions
@@ -22,7 +22,6 @@ export const apiService = {
   getBudgetInsights: (transactions: any[]) => axios.post(`${API_URL}/api/gemini/budget-insights`, { transactions }),
   getGoalAdvice: (goal: any) => axios.post(`${API_URL}/api/gemini/goal-advice`, { goal }),
 
-  // Live Voice Chat
-  getLiveVoiceWebSocketUrl: () => `ws://192.168.1.36:3000/live-voice`,
-  checkLiveVoiceHealth: () => axios.get(`${API_URL}/health`),
+  // New Chat Endpoint
+  postToChat: (history: any[], message: string) => axios.post(`${API_URL}/api/gemini/chat`, { history, message }),
 };

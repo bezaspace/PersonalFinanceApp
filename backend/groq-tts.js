@@ -34,7 +34,23 @@ function getSystemAudioPlayer() {
       // Try aplay first, fallback to play (sox)
       return { command: 'aplay', args: ['-t', 'wav', '-'] };
     case 'win32': // Windows
-      return { command: 'powershell', args: ['-Command', 'Add-Type -AssemblyName presentationCore; $player = New-Object System.Windows.Media.MediaPlayer; $player.Open([System.IO.MemoryStream]::new([System.Console]::OpenStandardInput().ReadToEnd())); $player.Play(); Start-Sleep 10'] };
+      return { command: 'powershell', args: ['-Command', `
+        Add-Type -AssemblyName presentationCore;
+        $tempFile = [System.IO.Path]::GetTempFileName() + '.wav';
+        $bytes = @();
+        do {
+          $byte = [System.Console]::In.Read();
+          if ($byte -ne -1) { $bytes += $byte }
+        } while ($byte -ne -1);
+        [System.IO.File]::WriteAllBytes($tempFile, $bytes);
+        $player = New-Object System.Windows.Media.MediaPlayer;
+        $player.Open([uri]$tempFile);
+        $player.Play();
+        Start-Sleep -Seconds 5;
+        $player.Stop();
+        $player.Close();
+        Remove-Item $tempFile -ErrorAction SilentlyContinue;
+      `.replace(/\s+/g, ' ').trim()] };
     default:
       return { command: 'aplay', args: ['-t', 'wav', '-'] };
   }
@@ -44,30 +60,134 @@ function getSystemAudioPlayer() {
 async function playAudioBuffer(audioBuffer) {
   return new Promise((resolve, reject) => {
     try {
-      const playerConfig = getSystemAudioPlayer();
-      console.log(`🔊 Playing audio via ${playerConfig.command}...`);
+      const platform = os.platform();
       
-      const player = spawn(playerConfig.command, playerConfig.args, {
-        stdio: ['pipe', 'inherit', 'pipe']
+      if (platform === 'win32') {
+        // For Windows, use a temporary file approach
+        playAudioBufferWindows(audioBuffer).then(resolve).catch(reject);
+      } else {
+        // For Unix-like systems, use streaming approach
+        const playerConfig = getSystemAudioPlayer();
+        console.log(`🔊 Playing audio via ${playerConfig.command}...`);
+        
+        const player = spawn(playerConfig.command, playerConfig.args, {
+          stdio: ['pipe', 'inherit', 'pipe']
+        });
+
+        // Handle player events
+        player.on('close', (code) => {
+          console.log('🎵 Audio playback finished');
+          resolve();
+        });
+
+        player.on('error', (error) => {
+          console.error('❌ Audio player error:', error.message);
+          reject(error);
+        });
+
+        // Stream audio data to player
+        player.stdin.write(audioBuffer);
+        player.stdin.end();
+      }
+
+    } catch (error) {
+      console.error('❌ Audio streaming error:', error.message);
+      reject(error);
+    }
+  });
+}
+
+// Windows-specific audio playback using temporary file
+async function playAudioBufferWindows(audioBuffer) {
+  return new Promise((resolve, reject) => {
+    try {
+      const tempFile = path.join(os.tmpdir(), `audio_${Date.now()}.wav`);
+      
+      // Write audio buffer to temporary file
+      fs.writeFileSync(tempFile, audioBuffer);
+      console.log(`📁 Audio file saved to: ${tempFile}`);
+      console.log(`📊 Audio file size: ${audioBuffer.length} bytes`);
+      
+      // Try PowerShell MediaPlayer first
+      console.log(`🔊 Attempting PowerShell MediaPlayer...`);
+      
+      const powershellCommand = `
+        try {
+          Write-Host "Loading audio file: ${tempFile.replace(/\\/g, '\\\\')}";
+          Add-Type -AssemblyName presentationCore;
+          $player = New-Object System.Windows.Media.MediaPlayer;
+          $player.Open([uri]'${tempFile.replace(/\\/g, '\\\\')}');
+          Write-Host "Starting playback...";
+          $player.Play();
+          
+          # Wait for the media to load and get duration
+          $timeout = 0;
+          while ($player.NaturalDuration.HasTimeSpan -eq $false -and $timeout -lt 50) {
+            Start-Sleep -Milliseconds 100;
+            $timeout++;
+          }
+          
+          if ($player.NaturalDuration.HasTimeSpan) {
+            # Get the duration and wait for it to finish
+            $duration = $player.NaturalDuration.TimeSpan.TotalSeconds;
+            Write-Host "Audio duration: $duration seconds";
+            Start-Sleep -Seconds $duration;
+          } else {
+            Write-Host "Could not determine audio duration, using fallback";
+            Start-Sleep -Seconds 3;
+          }
+          
+          $player.Stop();
+          $player.Close();
+          Write-Host "Playback completed successfully";
+        } catch {
+          Write-Host "PowerShell MediaPlayer failed: $_";
+          # Fallback to system default player
+          Write-Host "Trying system default player...";
+          Start-Process -FilePath '${tempFile.replace(/\\/g, '\\\\')}' -Wait;
+          Write-Host "System player completed";
+        } finally {
+          Start-Sleep -Seconds 1;
+          Remove-Item '${tempFile.replace(/\\/g, '\\\\')}' -ErrorAction SilentlyContinue;
+        }
+      `.replace(/\s+/g, ' ').trim();
+      
+      const player = spawn('powershell', ['-Command', powershellCommand], {
+        stdio: ['ignore', 'inherit', 'pipe']
       });
 
       // Handle player events
       player.on('close', (code) => {
-        console.log('🎵 Audio playback finished');
+        console.log('🎵 Audio playback process finished');
+        // Clean up temp file if it still exists
+        setTimeout(() => {
+          try {
+            if (fs.existsSync(tempFile)) {
+              fs.unlinkSync(tempFile);
+              console.log('🗑️ Cleaned up temp file');
+            }
+          } catch (e) {
+            // Ignore cleanup errors
+          }
+        }, 2000);
         resolve();
       });
 
       player.on('error', (error) => {
-        console.error('❌ Audio player error:', error.message);
+        console.error('❌ Audio player process error:', error.message);
+        // Clean up temp file if it still exists
+        try {
+          if (fs.existsSync(tempFile)) {
+            fs.unlinkSync(tempFile);
+          }
+        } catch (e) {
+          // Ignore cleanup errors
+        }
         reject(error);
       });
 
-      // Stream audio data to player
-      player.stdin.write(audioBuffer);
-      player.stdin.end();
-
     } catch (error) {
-      console.error('❌ Audio streaming error:', error.message);
+      console.error('❌ Windows audio playback error:', error.message);
       reject(error);
     }
   });

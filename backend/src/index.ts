@@ -2,8 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import db from './database';
-import { GoogleGenAI } from '@google/genai';
-import { initializeLiveVoiceServer } from './liveVoiceServer';
+import { GeminiChat } from './gemini-chat';
 
 dotenv.config();
 
@@ -13,12 +12,12 @@ const port = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// Initialize Google Generative AI
-const genAI = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY || '',
-});
+// Initialize Gemini Chat
+const geminiChat = new GeminiChat(process.env.GEMINI_API_KEY || '');
 
-// Transactions endpoints
+// --- API Endpoints ---
+
+// Transactions
 app.get("/transactions", (req, res) => {
     const sql = "SELECT * FROM transactions ORDER BY date DESC";
     db.all(sql, [], (err: any, rows: any) => {
@@ -34,7 +33,9 @@ app.get("/transactions", (req, res) => {
 });
 
 app.post("/transactions", (req, res) => {
-    const { id, description, amount, category, date, type } = req.body;
+    const { description, amount, category, date, type } = req.body;
+    // A simple ID generator for now
+    const id = `txn_${Date.now()}`; 
     const sql = 'INSERT INTO transactions (id, description, amount, category, date, type) VALUES (?,?,?,?,?,?)';
     const params = [id, description, amount, category, date, type];
     
@@ -51,7 +52,7 @@ app.post("/transactions", (req, res) => {
     });
 });
 
-// Budgets endpoints
+// Budgets
 app.get("/budgets", (req, res) => {
     const sql = "SELECT * FROM budgets";
     db.all(sql, [], (err: any, rows: any) => {
@@ -66,25 +67,7 @@ app.get("/budgets", (req, res) => {
     });
 });
 
-app.post("/budgets", (req, res) => {
-    const { id, category, limitAmount, spentAmount, period } = req.body;
-    const sql = 'INSERT INTO budgets (id, category, limit_amount, spent_amount, period) VALUES (?,?,?,?,?)';
-    const params = [id, category, limitAmount, spentAmount, period];
-    
-    db.run(sql, params, function(this: any, err: any) {
-        if (err) {
-            res.status(400).json({ "error": err.message });
-            return;
-        }
-        res.json({
-            "message": "success",
-            "data": { id, category, limitAmount, spentAmount, period },
-            "id": this.lastID
-        });
-    });
-});
-
-// Goals endpoints
+// Goals
 app.get("/goals", (req, res) => {
     const sql = "SELECT * FROM goals";
     db.all(sql, [], (err: any, rows: any) => {
@@ -106,94 +89,40 @@ app.get("/goals", (req, res) => {
     });
 });
 
-app.post("/goals", (req, res) => {
-    const { id, title, targetAmount, currentAmount, deadline, category } = req.body;
-    const sql = 'INSERT INTO goals (id, title, target_amount, current_amount, deadline, category) VALUES (?,?,?,?,?,?)';
-    const params = [id, title, targetAmount, currentAmount, deadline, category];
-    
-    db.run(sql, params, function(this: any, err: any) {
-        if (err) {
-            res.status(400).json({ "error": err.message });
-            return;
-        }
-        res.json({
-            "message": "success",
-            "data": { id, title, targetAmount, currentAmount, deadline, category },
-            "id": this.lastID
-        });
-    });
-});
-
-// Gemini AI endpoints
-app.post("/api/gemini/financial-advice", async (req, res) => {
-    const { prompt } = req.body;
+// New Gemini Chat Endpoint
+app.post("/api/gemini/chat", async (req, res) => {
+    const { history, message } = req.body;
     try {
-        const chat = genAI.chats.create({ model: "gemini-1.5-flash" });
-        const enhancedPrompt = `You are a helpful financial advisor. Please provide practical, actionable financial advice for this question: ${prompt}. Keep your response conversational, helpful, and focused on personal finance best practices.`;
-        
-        const result = await chat.sendMessage({ message: enhancedPrompt });
-        const advice = result.text || 'I apologize, but I could not generate advice for that question. Please try rephrasing your question.';
-        
-        res.json({ advice });
+        const response = await geminiChat.handleChat(history, message);
+        res.json(response);
     } catch (error) {
-        console.error('Financial advice error:', error);
-        res.status(500).json({ error: 'Failed to generate financial advice' });
+        console.error('Gemini chat error:', error);
+        res.status(500).json({ error: 'Failed to get response from Gemini' });
     }
 });
 
-app.post("/api/gemini/categorize-transaction", async (req, res) => {
-    const { description, amount } = req.body;
-    try {
-        const chat = genAI.chats.create({ model: "gemini-1.5-flash" });
-        const prompt = `Categorize this financial transaction into one of these categories: Food & Dining, Shopping, Transportation, Bills & Utilities, Entertainment, Healthcare, Travel, Education, Income, Other. Transaction: ${description}, Amount: ${Math.abs(amount)}. Respond with only the category name.`;
-        
-        const result = await chat.sendMessage({ message: prompt });
-        const category = (result.text || 'Other').trim();
-        
-        const validCategories = ['Food & Dining', 'Shopping', 'Transportation', 'Bills & Utilities', 'Entertainment', 'Healthcare', 'Travel', 'Education', 'Income', 'Other'];
-        res.json({ category: validCategories.includes(category) ? category : 'Other' });
-    } catch (error) {
-        console.error('Transaction categorization error:', error);
-        res.status(500).json({ error: 'Failed to categorize transaction' });
-    }
-});
-
-app.post("/api/gemini/budget-insights", async (req, res) => {
-    const { transactions } = req.body;
-    try {
-        const chat = genAI.chats.create({ model: "gemini-1.5-flash" });
-        const prompt = `Analyze these spending patterns and provide budget insights: ${JSON.stringify(transactions)}. Provide 2-3 key insights and actionable recommendations. Keep it concise and helpful.`;
-        
-        const result = await chat.sendMessage({ message: prompt });
-        const insights = result.text || 'No insights generated';
-        
-        res.json({ insights });
-    } catch (error) {
-        console.error('Budget insights error:', error);
-        res.status(500).json({ error: 'Failed to generate budget insights' });
-    }
-});
-
-app.post("/api/gemini/goal-advice", async (req, res) => {
-    const { goal } = req.body;
-    try {
-        const chat = genAI.chats.create({ model: "gemini-1.5-flash" });
-        const prompt = `Provide advice for this financial goal: ${JSON.stringify(goal)}. Give practical advice on how to reach this goal.`;
-        
-        const result = await chat.sendMessage({ message: prompt });
-        const advice = result.text || 'No advice generated';
-        
-        res.json({ advice });
-    } catch (error) {
-        console.error('Goal advice error:', error);
-        res.status(500).json({ error: 'Failed to generate goal advice' });
-    }
-});
 
 const server = app.listen(Number(port), '0.0.0.0', () => {
     console.log(`Server is running on http://0.0.0.0:${port}`);
-    console.log(`Access from your device: http://192.168.1.36:${port}`);
+    // Find the local IP address and log it for easy access
+    const { networkInterfaces } = require('os');
+    const nets = networkInterfaces();
+    const results = Object.create(null); 
+    for (const name of Object.keys(nets)) {
+        for (const net of nets[name]) {
+            // Skip over non-IPv4 and internal (i.e. 127.0.0.1) addresses
+            if (net.family === 'IPv4' && !net.internal) {
+                if (!results[name]) {
+                    results[name] = [];
+                }
+                results[name].push(net.address);
+            }
+        }
+    }
+    console.log('Access from your local network:');
+    Object.keys(results).forEach(name => {
+        results[name].forEach((address: string) => {
+            console.log(`   ${name}: http://${address}:${port}`);
+        });
+    });
 });
-
-// Initialize live voice WebSocket server
-initializeLiveVoiceServer(server);
